@@ -12,7 +12,12 @@ from database import db, create_document
 from schemas import Job, Asset
 
 # Optional imports made safe so startup never crashes if a lib is missing
-import numpy as np
+try:
+    import numpy as np  # type: ignore
+    HAVE_NP = True
+except Exception:
+    np = None  # type: ignore
+    HAVE_NP = False
 
 try:
     import cv2  # type: ignore
@@ -88,8 +93,6 @@ async def create_job(
         progress=0.05,
         source_files=saved_paths,
     )
-    # Note: create_document requires a configured DB; environment in this sandbox
-    # provides MongoDB. If not, it would raise, but startup remains fine.
     job_id = create_document("job", job)
 
     # Run lightweight AI pipeline synchronously for demo purposes
@@ -123,21 +126,38 @@ async def create_job(
         )
         doc = db["job"].find_one({"_id": oid})
     except Exception:
-        db["job"].update_one(
-            {"_id": job_id},
-            {"$set": {
+        try:
+            db["job"].update_one(
+                {"_id": job_id},
+                {"$set": {
+                    "recognized_game": recognized_game,
+                    "results": results,
+                    "status": "done",
+                    "progress": 1.0,
+                }}
+            )
+            doc = db["job"].find_one({"_id": job_id})
+        except Exception:
+            # If even that fails (e.g., local JSON fallback without update_one), synthesize a job doc
+            doc = {
+                "_id": job_id,
                 "recognized_game": recognized_game,
                 "results": results,
                 "status": "done",
                 "progress": 1.0,
-            }}
-        )
-        doc = db["job"].find_one({"_id": job_id})
+                "mode": mode,
+                "target_duration_sec": int(target_duration_sec),
+                "output_format": output_format,
+                "source_files": saved_paths,
+            }
 
-    # Store assets records
-    for res in results:
-        create_document("asset", Asset(job_id=job_id, kind="video", url=res["video_url"]).model_dump())
-        create_document("asset", Asset(job_id=job_id, kind="cover", url=res["cover_url"]).model_dump())
+    # Store assets records (ignore failures in fallback mode)
+    try:
+        for res in results:
+            create_document("asset", Asset(job_id=job_id, kind="video", url=res["video_url"]).model_dump())
+            create_document("asset", Asset(job_id=job_id, kind="cover", url=res["cover_url"]).model_dump())
+    except Exception:
+        pass
 
     if doc and "_id" in doc:
         doc["_id"] = str(doc["_id"])
@@ -151,7 +171,10 @@ async def get_job(job_id: str):
         from bson import ObjectId
         doc = db["job"].find_one({"_id": ObjectId(job_id)})
     except Exception:
-        doc = db["job"].find_one({"_id": job_id})
+        try:
+            doc = db["job"].find_one({"_id": job_id})
+        except Exception:
+            doc = None
     if not doc:
         return {"error": "job not found"}
     if "_id" in doc:
@@ -209,13 +232,13 @@ def detect_highlights(paths: List[str]) -> List[dict]:
     """Intensity-based highlight detection using frame diffs as a proxy for action peaks."""
     if not HAVE_CV2:
         return []
-    peaks = []
+    peaks: List[dict] = []
     for path in paths:
         cap = cv2.VideoCapture(path)  # type: ignore
         if not cap.isOpened():
             continue
         prev = None
-        scores = []
+        scores: List[float] = []
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -224,13 +247,21 @@ def detect_highlights(paths: List[str]) -> List[dict]:
             gray = cv2.resize(gray, (160, 90))  # type: ignore
             if prev is not None:
                 diff = cv2.absdiff(gray, prev)  # type: ignore
-                score = float(np.mean(diff))
-                scores.append(score)
+                # mean without numpy
+                h, w = diff.shape[:2]
+                s = float(diff.sum()) / float(h * w)
+                scores.append(s)
             prev = gray
         cap.release()
         if scores:
-            arr = np.array(scores)
-            thr = float(np.percentile(arr, 95))
+            if HAVE_NP:
+                arr = np.array(scores)  # type: ignore
+                thr = float(np.percentile(arr, 95))  # type: ignore
+            else:
+                # simple percentile approximation without numpy
+                sorted_scores = sorted(scores)
+                k = max(0, min(len(sorted_scores) - 1, int(0.95 * len(sorted_scores)) - 1))
+                thr = float(sorted_scores[k])
             for i, s in enumerate(scores):
                 if s >= thr:
                     peaks.append({"source": path, "frame_index": i, "intensity": s})
@@ -257,7 +288,7 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
                 frame = cv2.resize(frame, size)  # type: ignore
                 if variant % 3 == 1:
                     frame = cv2.GaussianBlur(frame, (5, 5), 0)  # type: ignore
-                if variant % 3 == 2:
+                if variant % 3 == 2 and HAVE_NP:
                     overlay = frame.copy()
                     # light border overlay
                     if frame.shape[1] > 40 and frame.shape[0] > 40:
@@ -266,7 +297,7 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
                         overlay[:40, :] = (0, 255, 180)
                         overlay[-40:, :] = (0, 255, 180)
                         alpha = 0.08
-                        frame = np.clip(overlay * alpha + frame * (1 - alpha), 0, 255).astype(frame.dtype)
+                        frame = (overlay * alpha + frame * (1 - alpha)).clip(0, 255).astype(frame.dtype)  # type: ignore
                 writer.write(frame)  # type: ignore
                 count += 1
             cap.release()
@@ -275,7 +306,11 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
         # Fallback: copy the first source as the variant output if available
         if sources:
             src = sources[0]
-            shutil.copyfile(src, out_path)
+            try:
+                shutil.copyfile(src, out_path)
+            except Exception:
+                with open(out_path, "wb") as f:
+                    f.write(b"")
         else:
             # create an empty file to avoid 404
             with open(out_path, "wb") as f:
@@ -283,12 +318,13 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
 
 
 def generate_cover_image(job_id: str, variant: int) -> str:
-    """Generate a synthetic cover image using PIL if available, else NumPy+OpenCV fallback."""
+    """Generate a synthetic cover image using PIL if available, else OpenCV or a blank file."""
     path = os.path.join(ASSETS_DIR, f"{job_id}_cover_{variant+1}.png")
     w, h = 1280, 720
     if HAVE_PIL:
         img = Image.new("RGB", (w, h))
         dr = ImageDraw.Draw(img)
+        # simple vertical gradient
         for y in range(h):
             alpha = y / h
             c = (
@@ -302,21 +338,16 @@ def generate_cover_image(job_id: str, variant: int) -> str:
         dr.text((60, 200), "AI Gaming Edit", fill=(10, 10, 10))
         img.save(path)
         return path
+    elif HAVE_CV2:
+        # single-color banner if PIL and NumPy aren't available
+        import numpy as _np  # type: ignore
+        img = _np.zeros((h, w, 3), dtype=_np.uint8)
+        color = (30 + 20 * (variant % 5), 180, 120)
+        img[:] = color
+        cv2.imwrite(path, img)  # type: ignore
+        return path
     else:
-        img = np.zeros((h, w, 3), dtype=np.uint8)
-        color1 = (int(30 + 20 * variant) % 255, 180, 120)
-        color2 = (60, int(120 + 25 * variant) % 255, 220)
-        for y in range(h):
-            alpha = y / h
-            c = (
-                int(color1[0] * (1 - alpha) + color2[0] * alpha),
-                int(color1[1] * (1 - alpha) + color2[1] * alpha),
-                int(color1[2] * (1 - alpha) + color2[2] * alpha),
-            )
-            img[y, :] = c
-        if HAVE_CV2:
-            cv2.imwrite(path, img)  # type: ignore
-            return path
+        # create an empty placeholder to avoid 404
         with open(path, "wb") as f:
             f.write(b"")
         return path
