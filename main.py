@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from database import db, create_document
 from schemas import Job, Asset
 
-# Optional dependencies with safe fallbacks
+# Optional imports made safe so startup never crashes if a lib is missing
 import numpy as np
 
 try:
@@ -43,7 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use a local writable data directory inside the working dir
+# Use a local, writable data directory in the project workspace
 BASE_DIR = os.getcwd()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 ASSETS_DIR = os.path.join(DATA_DIR, "assets")
@@ -88,6 +88,8 @@ async def create_job(
         progress=0.05,
         source_files=saved_paths,
     )
+    # Note: create_document requires a configured DB; environment in this sandbox
+    # provides MongoDB. If not, it would raise, but startup remains fine.
     job_id = create_document("job", job)
 
     # Run lightweight AI pipeline synchronously for demo purposes
@@ -237,7 +239,7 @@ def detect_highlights(paths: List[str]) -> List[dict]:
 
 def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> None:
     """Create an output video. If OpenCV available, stitch; otherwise copy source."""
-    if HAVE_CV2:
+    if HAVE_CV2 and len(sources) > 0:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore
         fps = 24
         size = (640, 360)
@@ -257,7 +259,6 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
                     frame = cv2.GaussianBlur(frame, (5, 5), 0)  # type: ignore
                 if variant % 3 == 2:
                     overlay = frame.copy()
-                    import numpy as _np
                     # light border overlay
                     if frame.shape[1] > 40 and frame.shape[0] > 40:
                         overlay[:, :40] = (0, 255, 180)
@@ -265,29 +266,29 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
                         overlay[:40, :] = (0, 255, 180)
                         overlay[-40:, :] = (0, 255, 180)
                         alpha = 0.08
-                        frame = (_np.clip(overlay * alpha + frame * (1 - alpha), 0, 255)).astype(frame.dtype)
+                        frame = np.clip(overlay * alpha + frame * (1 - alpha), 0, 255).astype(frame.dtype)
                 writer.write(frame)  # type: ignore
                 count += 1
             cap.release()
         writer.release()  # type: ignore
     else:
-        # Fallback: copy the first source as the variant output
+        # Fallback: copy the first source as the variant output if available
         if sources:
             src = sources[0]
             shutil.copyfile(src, out_path)
         else:
-            # create an empty placeholder file
-            open(out_path, "wb").close()
+            # create an empty file to avoid 404
+            with open(out_path, "wb") as f:
+                f.write(b"")
 
 
 def generate_cover_image(job_id: str, variant: int) -> str:
-    """Generate a synthetic cover image using PIL if available, else NumPy fallback saved via OpenCV if present."""
+    """Generate a synthetic cover image using PIL if available, else NumPy+OpenCV fallback."""
     path = os.path.join(ASSETS_DIR, f"{job_id}_cover_{variant+1}.png")
+    w, h = 1280, 720
     if HAVE_PIL:
-        w, h = 1280, 720
         img = Image.new("RGB", (w, h))
-        # gradient background
-        draw = ImageDraw.Draw(img)
+        dr = ImageDraw.Draw(img)
         for y in range(h):
             alpha = y / h
             c = (
@@ -295,15 +296,13 @@ def generate_cover_image(job_id: str, variant: int) -> str:
                 int(180 * (1 - alpha) + (120 + 25 * variant) * alpha) % 255,
                 int(120 * (1 - alpha) + 220 * alpha) % 255,
             )
-            draw.line([(0, y), (w, y)], fill=c)
-        draw.rectangle([40, 40, w - 40, h - 40], outline=(10, 10, 10), width=6)
-        draw.text((60, 120), f"Versione {variant+1}", fill=(20, 20, 20))
-        draw.text((60, 200), "AI Gaming Edit", fill=(10, 10, 10))
+            dr.line([(0, y), (w, y)], fill=c)
+        dr.rectangle([40, 40, w - 40, h - 40], outline=(10, 10, 10), width=6)
+        dr.text((60, 120), f"Versione {variant+1}", fill=(20, 20, 20))
+        dr.text((60, 200), "AI Gaming Edit", fill=(10, 10, 10))
         img.save(path)
         return path
     else:
-        # NumPy + OpenCV fallback
-        w, h = 1280, 720
         img = np.zeros((h, w, 3), dtype=np.uint8)
         color1 = (int(30 + 20 * variant) % 255, 180, 120)
         color2 = (60, int(120 + 25 * variant) % 255, 220)
@@ -318,7 +317,6 @@ def generate_cover_image(job_id: str, variant: int) -> str:
         if HAVE_CV2:
             cv2.imwrite(path, img)  # type: ignore
             return path
-        # last resort: create an empty file
         with open(path, "wb") as f:
             f.write(b"")
         return path
