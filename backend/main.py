@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from database import db, create_document
 from schemas import Job, Asset
 
-# Optional dependencies with safe fallbacks
+# Optional: Anthropic and basic CV imports
 import numpy as np
 
 try:
@@ -43,7 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use a local writable data directory inside the working dir
+# Use project working directory for write access
 BASE_DIR = os.getcwd()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 ASSETS_DIR = os.path.join(DATA_DIR, "assets")
@@ -272,12 +272,8 @@ def synthesize_video(sources: List[str], out_path: str, variant: int = 0) -> Non
         writer.release()  # type: ignore
     else:
         # Fallback: copy the first source as the variant output
-        if sources:
-            src = sources[0]
-            shutil.copyfile(src, out_path)
-        else:
-            # create an empty placeholder file
-            open(out_path, "wb").close()
+        src = sources[0]
+        shutil.copyfile(src, out_path)
 
 
 def generate_cover_image(job_id: str, variant: int) -> str:
@@ -286,8 +282,7 @@ def generate_cover_image(job_id: str, variant: int) -> str:
     if HAVE_PIL:
         w, h = 1280, 720
         img = Image.new("RGB", (w, h))
-        # gradient background
-        draw = ImageDraw.Draw(img)
+        # gradient
         for y in range(h):
             alpha = y / h
             c = (
@@ -295,10 +290,11 @@ def generate_cover_image(job_id: str, variant: int) -> str:
                 int(180 * (1 - alpha) + (120 + 25 * variant) * alpha) % 255,
                 int(120 * (1 - alpha) + 220 * alpha) % 255,
             )
-            draw.line([(0, y), (w, y)], fill=c)
-        draw.rectangle([40, 40, w - 40, h - 40], outline=(10, 10, 10), width=6)
-        draw.text((60, 120), f"Versione {variant+1}", fill=(20, 20, 20))
-        draw.text((60, 200), "AI Gaming Edit", fill=(10, 10, 10))
+            ImageDraw.Draw(img).line([(0, y), (w, y)], fill=c)
+        d = ImageDraw.Draw(img)
+        d.rectangle([40, 40, w - 40, h - 40], outline=(10, 10, 10), width=6)
+        d.text((60, 120), f"Versione {variant+1}", fill=(20, 20, 20))
+        d.text((60, 200), "AI Gaming Edit", fill=(10, 10, 10))
         img.save(path)
         return path
     else:
@@ -318,7 +314,7 @@ def generate_cover_image(job_id: str, variant: int) -> str:
         if HAVE_CV2:
             cv2.imwrite(path, img)  # type: ignore
             return path
-        # last resort: create an empty file
+        # last resort: write nothing but ensure file exists
         with open(path, "wb") as f:
             f.write(b"")
         return path

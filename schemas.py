@@ -2,47 +2,26 @@
 Database Schemas
 
 Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
 Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Model name is converted to lowercase for the collection name.
 """
-
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional, Dict, Any
 
-# Example schemas (replace with your own):
+class Job(BaseModel):
+    user_id: Optional[str] = Field(None, description="Optional user identifier")
+    mode: str = Field(..., description="processing mode: full or clips")
+    target_duration_sec: int = Field(900, description="Desired duration for final edit in seconds")
+    output_format: str = Field("16:9", description="Output aspect format")
+    status: str = Field("queued", description="queued|processing|done|error")
+    progress: float = Field(0.0, description="0..1 progress")
+    recognized_game: Optional[str] = Field(None, description="Detected game title")
+    source_files: List[str] = Field(default_factory=list, description="Uploaded source file paths")
+    results: List[Dict[str, Any]] = Field(default_factory=list, description="List of outputs: {video_url, cover_url, meta}")
+    error: Optional[str] = None
 
-class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
-
-class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
-
-# Add your own schemas here:
-# --------------------------------------------------
-
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Asset(BaseModel):
+    job_id: str = Field(...)
+    kind: str = Field(..., description="video|cover")
+    url: str = Field(...)
+    meta: Dict[str, Any] = Field(default_factory=dict)
